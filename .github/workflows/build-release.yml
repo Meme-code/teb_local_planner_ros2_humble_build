@@ -15,6 +15,9 @@ env:
   ROS_DISTRO: humble
   PACKAGE_NAME: teb-local-planner
 
+permissions:
+  contents: write
+
 jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
