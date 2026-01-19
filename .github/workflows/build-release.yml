@@ -18,7 +18,7 @@ env:
 jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
-    
+
     container:
       image: arm64v8/ros:humble-perception
       options: --user root
@@ -48,8 +48,8 @@ jobs:
           cd /ros2_ws/src
 
           # Clone teb_local_planner and dependencies
-          git clone https://github.com/rst-tu-dortmund/teb_local_planner.git -b ros2-master
-          git clone https://github.com/rst-tu-dortmund/costmap_converter.git -b ros2
+          git clone https://github.com/rst-tu-dortmund/teb_local_planner.git -b humble-devel
+          git clone https://github.com/rst-tu-dortmund/costmap_converter.git -b humble
 
       - name: Install package dependencies
         run: |
