@@ -2,11 +2,6 @@
 
 GitHub Actions workflow to build `teb_local_planner` ROS2 package and release `.deb` packages for ARM64/aarch64.
 
-## Requirements
-
-- Self-hosted ARM64 GitHub Actions runner with Docker installed
-- Runner must have labels: `self-hosted`, `ARM64`
-
 ## Usage
 
 ### Manual Build
