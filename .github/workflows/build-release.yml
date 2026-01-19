@@ -1,0 +1,138 @@
+name: Build and Release teb_local_planner
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for release (e.g., 1.0.0)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+env:
+  ROS_DISTRO: humble
+  PACKAGE_NAME: teb-local-planner
+
+jobs:
+  build-arm64:
+    runs-on: [self-hosted, ARM64]
+
+    container:
+      image: arm64v8/ros:humble-perception
+      options: --user root
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            python3-colcon-common-extensions \
+            python3-rosdep \
+            dpkg-dev \
+            fakeroot \
+            git
+
+      - name: Initialize rosdep
+        run: |
+          rosdep init || true
+          rosdep update
+
+      - name: Create workspace and clone sources
+        run: |
+          mkdir -p /ros2_ws/src
+          cd /ros2_ws/src
+
+          # Clone teb_local_planner and dependencies
+          git clone https://github.com/rst-tu-dortmund/teb_local_planner.git -b ros2-master
+          git clone https://github.com/rst-tu-dortmund/costmap_converter.git -b ros2
+
+      - name: Install package dependencies
+        run: |
+          cd /ros2_ws
+          . /opt/ros/${ROS_DISTRO}/setup.sh
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Build packages
+        run: |
+          cd /ros2_ws
+          . /opt/ros/${ROS_DISTRO}/setup.sh
+          colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+      - name: Create .deb package
+        run: |
+          # Determine version
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          ARCH=$(dpkg --print-architecture)
+          PKG_DIR="/deb_pkg"
+          INSTALL_DIR="${PKG_DIR}/opt/ros/${ROS_DISTRO}"
+
+          # Create package directory structure
+          mkdir -p ${PKG_DIR}/DEBIAN
+          mkdir -p ${INSTALL_DIR}
+
+          # Copy built files
+          cp -r /ros2_ws/install/teb_local_planner/* ${INSTALL_DIR}/
+          cp -r /ros2_ws/install/costmap_converter/* ${INSTALL_DIR}/ || true
+
+          # Create control file
+          cat > ${PKG_DIR}/DEBIAN/control << EOF
+          Package: ros-${ROS_DISTRO}-${PACKAGE_NAME}
+          Version: ${VERSION}
+          Section: misc
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: ros-${ROS_DISTRO}-ros-base
+          Maintainer: GitHub Actions <actions@github.com>
+          Description: TEB Local Planner for ROS2 ${ROS_DISTRO}
+           Timed Elastic Band approach for local trajectory planning.
+           Built for ${ARCH} architecture.
+          EOF
+
+          # Remove leading spaces from control file
+          sed -i 's/^          //' ${PKG_DIR}/DEBIAN/control
+
+          # Set permissions
+          chmod -R 755 ${PKG_DIR}
+          chmod 644 ${PKG_DIR}/DEBIAN/control
+
+          # Build the .deb package
+          DEB_FILE="ros-${ROS_DISTRO}-${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
+          dpkg-deb --build ${PKG_DIR} ${GITHUB_WORKSPACE}/${DEB_FILE}
+
+          echo "DEB_FILE=${DEB_FILE}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: teb-local-planner-arm64-deb
+          path: ${{ github.workspace }}/${{ env.DEB_FILE }}
+
+      - name: Create Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ github.workspace }}/${{ env.DEB_FILE }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release (manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          files: ${{ github.workspace }}/${{ env.DEB_FILE }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
