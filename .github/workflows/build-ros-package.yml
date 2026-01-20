@@ -8,6 +8,7 @@ on:
         required: true
         type: choice
         options:
+          - all
           - teb
           - mppi
           - costmap-converter
@@ -57,32 +58,45 @@ jobs:
           with open('.github/packages.yml', 'r') as f:
               config = yaml.safe_load(f)
 
-          pkg = config['packages']['${{ github.event.inputs.package }}']
+          selected = '${{ github.event.inputs.package }}'
           arm64_targets_config = config.get('arm64_targets', {})
 
-          # Get package's arm64 targets, default to generic
-          pkg_targets = pkg.get('arm64_targets', ['generic'])
+          # Get list of packages to build
+          if selected == 'all':
+              package_names = list(config['packages'].keys())
+          else:
+              package_names = [selected]
 
-          # Build target info list
-          targets = []
-          for target_name in pkg_targets:
-              if target_name in arm64_targets_config:
-                  target = arm64_targets_config[target_name]
-                  targets.append({
-                      'name': target_name,
-                      'cpu_flags': target['cpu_flags'],
-                      'suffix': target['suffix']
-                  })
+          # Build package info list
+          packages_info = []
+          for pkg_name in package_names:
+              pkg = config['packages'][pkg_name]
+              pkg_targets = pkg.get('arm64_targets', ['generic'])
+
+              targets = []
+              for target_name in pkg_targets:
+                  if target_name in arm64_targets_config:
+                      target = arm64_targets_config[target_name]
+                      targets.append({
+                          'name': target_name,
+                          'cpu_flags': target['cpu_flags'],
+                          'suffix': target['suffix']
+                      })
+
+              packages_info.append({
+                  'pkg_name': pkg_name,
+                  'deb_name': pkg['deb_name'],
+                  'description': pkg['description'].strip().split('\n')[0],
+                  'repositories': pkg['repositories'],
+                  'install_dirs': pkg['install_dirs'],
+                  'dependencies': ', '.join(pkg['dependencies']),
+                  'arm64_targets': targets
+              })
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"deb_name={pkg['deb_name']}\n")
-              f.write(f"description={pkg['description'].strip().split(chr(10))[0]}\n")
-              f.write(f"repositories={json.dumps(pkg['repositories'])}\n")
-              f.write(f"install_dirs={json.dumps(pkg['install_dirs'])}\n")
-              f.write(f"dependencies={', '.join(pkg['dependencies'])}\n")
-              f.write(f"arm64_targets={json.dumps(targets)}\n")
+              f.write(f"packages={json.dumps(packages_info)}\n")
 
-          print(f"ARM64 targets: {targets}")
+          print(f"Packages to build: {[p['pkg_name'] for p in packages_info]}")
           EOF
 
       - name: Initialize rosdep
@@ -100,22 +114,31 @@ jobs:
           import subprocess
           import os
 
-          repos = json.loads('${{ steps.pkg-config.outputs.repositories }}')
+          packages = json.loads('${{ steps.pkg-config.outputs.packages }}')
+          cloned_repos = set()
 
-          for repo in repos:
-              url = repo['url']
-              branch = repo['branch']
-              sparse = repo.get('sparse_checkout', None)
-              repo_name = url.rstrip('/').split('/')[-1].replace('.git', '')
+          for pkg in packages:
+              for repo in pkg['repositories']:
+                  url = repo['url']
+                  branch = repo['branch']
+                  sparse = repo.get('sparse_checkout', None)
+                  repo_name = url.rstrip('/').split('/')[-1].replace('.git', '')
 
-              if sparse:
-                  subprocess.run(['git', 'clone', '--filter=blob:none', '--sparse', '-b', branch, url, repo_name], check=True)
-                  os.chdir(repo_name)
-                  for path in sparse:
-                      subprocess.run(['git', 'sparse-checkout', 'add', path], check=True)
-                  os.chdir('..')
-              else:
-                  subprocess.run(['git', 'clone', '-b', branch, url], check=True)
+                  # Skip if already cloned
+                  repo_key = f"{url}:{branch}"
+                  if repo_key in cloned_repos:
+                      print(f"Skipping {repo_name} (already cloned)")
+                      continue
+                  cloned_repos.add(repo_key)
+
+                  if sparse:
+                      subprocess.run(['git', 'clone', '--filter=blob:none', '--sparse', '-b', branch, url, repo_name], check=True)
+                      os.chdir(repo_name)
+                      for path in sparse:
+                          subprocess.run(['git', 'sparse-checkout', 'add', path], check=True)
+                      os.chdir('..')
+                  else:
+                      subprocess.run(['git', 'clone', '-b', branch, url], check=True)
           EOF
 
       - name: Install package dependencies
@@ -132,17 +155,22 @@ jobs:
           import shutil
           import os
 
-          targets = json.loads('${{ steps.pkg-config.outputs.arm64_targets }}')
-          install_dirs = json.loads('${{ steps.pkg-config.outputs.install_dirs }}')
-          deb_name = "${{ steps.pkg-config.outputs.deb_name }}"
-          dependencies = "${{ steps.pkg-config.outputs.dependencies }}"
-          description = "${{ steps.pkg-config.outputs.description }}"
+          packages = json.loads('${{ steps.pkg-config.outputs.packages }}')
           version = "${{ github.event.inputs.version }}"
           ros_distro = os.environ.get('ROS_DISTRO', 'humble')
           workspace = os.environ.get('GITHUB_WORKSPACE', '.')
+          arch = subprocess.check_output(['dpkg', '--print-architecture']).decode().strip()
 
-          for target in targets:
-              target_name = target['name']
+          # Collect all unique CPU targets across all packages
+          all_targets = {}
+          for pkg in packages:
+              for target in pkg['arm64_targets']:
+                  target_key = target['name']
+                  if target_key not in all_targets:
+                      all_targets[target_key] = target
+
+          # Build once per CPU target, then package each package
+          for target_name, target in all_targets.items():
               cpu_flags = target['cpu_flags']
               suffix = target['suffix']
 
@@ -166,38 +194,45 @@ jobs:
                   f'-DCMAKE_C_FLAGS={cpu_flags}'
               ]
 
-              # Source ROS and build
               subprocess.run(
                   f'. /opt/ros/{ros_distro}/setup.sh && {" ".join(build_cmd)}',
                   shell=True, check=True, executable='/bin/bash'
               )
 
-              # Create .deb package
-              arch = subprocess.check_output(['dpkg', '--print-architecture']).decode().strip()
-              pkg_dir = '/deb_pkg'
-              install_dir = f'{pkg_dir}/opt/ros/{ros_distro}'
+              # Create .deb for each package that needs this target
+              for pkg in packages:
+                  pkg_targets = [t['name'] for t in pkg['arm64_targets']]
+                  if target_name not in pkg_targets:
+                      continue
 
-              # Clean and create package directory
-              if os.path.exists(pkg_dir):
-                  shutil.rmtree(pkg_dir)
-              os.makedirs(f'{pkg_dir}/DEBIAN')
-              os.makedirs(install_dir)
+                  deb_name = pkg['deb_name']
+                  description = pkg['description']
+                  dependencies = pkg['dependencies']
+                  install_dirs = pkg['install_dirs']
 
-              # Copy install directories
-              for dir_name in install_dirs:
-                  src = f'/ros2_ws/install/{dir_name}'
-                  if os.path.exists(src):
-                      for item in os.listdir(src):
-                          s = os.path.join(src, item)
-                          d = os.path.join(install_dir, item)
-                          if os.path.isdir(s):
-                              shutil.copytree(s, d, dirs_exist_ok=True)
-                          else:
-                              shutil.copy2(s, d)
-                      print(f"Copied {dir_name}")
+                  print(f"\nPackaging {pkg['pkg_name']} for {target_name}...")
 
-              # Create control file
-              control_content = f"""Package: ros-{ros_distro}-{deb_name}{suffix}
+                  pkg_dir = '/deb_pkg'
+                  install_dir = f'{pkg_dir}/opt/ros/{ros_distro}'
+
+                  if os.path.exists(pkg_dir):
+                      shutil.rmtree(pkg_dir)
+                  os.makedirs(f'{pkg_dir}/DEBIAN')
+                  os.makedirs(install_dir)
+
+                  for dir_name in install_dirs:
+                      src = f'/ros2_ws/install/{dir_name}'
+                      if os.path.exists(src):
+                          for item in os.listdir(src):
+                              s = os.path.join(src, item)
+                              d = os.path.join(install_dir, item)
+                              if os.path.isdir(s):
+                                  shutil.copytree(s, d, dirs_exist_ok=True)
+                              else:
+                                  shutil.copy2(s, d)
+                          print(f"  Copied {dir_name}")
+
+                  control_content = f"""Package: ros-{ros_distro}-{deb_name}{suffix}
           Version: {version}
           Section: misc
           Priority: optional
@@ -207,20 +242,18 @@ jobs:
           Description: {description} (optimized for {target_name})
           """
 
-              with open(f'{pkg_dir}/DEBIAN/control', 'w') as f:
-                  for line in control_content.strip().split('\n'):
-                      f.write(line.strip() + '\n')
+                  with open(f'{pkg_dir}/DEBIAN/control', 'w') as f:
+                      for line in control_content.strip().split('\n'):
+                          f.write(line.strip() + '\n')
 
-              os.chmod(f'{pkg_dir}/DEBIAN/control', 0o644)
-              subprocess.run(['chmod', '-R', '755', pkg_dir], check=True)
-              subprocess.run(['chmod', '644', f'{pkg_dir}/DEBIAN/control'], check=True)
+                  subprocess.run(['chmod', '-R', '755', pkg_dir], check=True)
+                  subprocess.run(['chmod', '644', f'{pkg_dir}/DEBIAN/control'], check=True)
 
-              # Build .deb
-              deb_file = f'ros-{ros_distro}-{deb_name}{suffix}_{version}_{arch}.deb'
-              subprocess.run(['dpkg-deb', '--build', pkg_dir, f'{workspace}/{deb_file}'], check=True)
-              print(f"Created: {deb_file}")
+                  deb_file = f'ros-{ros_distro}-{deb_name}{suffix}_{version}_{arch}.deb'
+                  subprocess.run(['dpkg-deb', '--build', pkg_dir, f'{workspace}/{deb_file}'], check=True)
+                  print(f"  Created: {deb_file}")
 
-          print("\nAll ARM64 targets built successfully!")
+          print("\nAll ARM64 packages built successfully!")
           PYEOF
 
       - name: Upload artifacts
@@ -263,14 +296,29 @@ jobs:
           with open('.github/packages.yml', 'r') as f:
               config = yaml.safe_load(f)
 
-          pkg = config['packages']['${{ github.event.inputs.package }}']
+          selected = '${{ github.event.inputs.package }}'
+
+          if selected == 'all':
+              package_names = list(config['packages'].keys())
+          else:
+              package_names = [selected]
+
+          packages_info = []
+          for pkg_name in package_names:
+              pkg = config['packages'][pkg_name]
+              packages_info.append({
+                  'pkg_name': pkg_name,
+                  'deb_name': pkg['deb_name'],
+                  'description': pkg['description'].strip().split('\n')[0],
+                  'repositories': pkg['repositories'],
+                  'install_dirs': pkg['install_dirs'],
+                  'dependencies': ', '.join(pkg['dependencies'])
+              })
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"deb_name={pkg['deb_name']}\n")
-              f.write(f"description={pkg['description'].strip().split(chr(10))[0]}\n")
-              f.write(f"repositories={json.dumps(pkg['repositories'])}\n")
-              f.write(f"install_dirs={json.dumps(pkg['install_dirs'])}\n")
-              f.write(f"dependencies={', '.join(pkg['dependencies'])}\n")
+              f.write(f"packages={json.dumps(packages_info)}\n")
+
+          print(f"Packages to build: {[p['pkg_name'] for p in packages_info]}")
           EOF
 
       - name: Initialize rosdep
@@ -288,22 +336,30 @@ jobs:
           import subprocess
           import os
 
-          repos = json.loads('${{ steps.pkg-config.outputs.repositories }}')
+          packages = json.loads('${{ steps.pkg-config.outputs.packages }}')
+          cloned_repos = set()
 
-          for repo in repos:
-              url = repo['url']
-              branch = repo['branch']
-              sparse = repo.get('sparse_checkout', None)
-              repo_name = url.rstrip('/').split('/')[-1].replace('.git', '')
+          for pkg in packages:
+              for repo in pkg['repositories']:
+                  url = repo['url']
+                  branch = repo['branch']
+                  sparse = repo.get('sparse_checkout', None)
+                  repo_name = url.rstrip('/').split('/')[-1].replace('.git', '')
 
-              if sparse:
-                  subprocess.run(['git', 'clone', '--filter=blob:none', '--sparse', '-b', branch, url, repo_name], check=True)
-                  os.chdir(repo_name)
-                  for path in sparse:
-                      subprocess.run(['git', 'sparse-checkout', 'add', path], check=True)
-                  os.chdir('..')
-              else:
-                  subprocess.run(['git', 'clone', '-b', branch, url], check=True)
+                  repo_key = f"{url}:{branch}"
+                  if repo_key in cloned_repos:
+                      print(f"Skipping {repo_name} (already cloned)")
+                      continue
+                  cloned_repos.add(repo_key)
+
+                  if sparse:
+                      subprocess.run(['git', 'clone', '--filter=blob:none', '--sparse', '-b', branch, url, repo_name], check=True)
+                      os.chdir(repo_name)
+                      for path in sparse:
+                          subprocess.run(['git', 'sparse-checkout', 'add', path], check=True)
+                      os.chdir('..')
+                  else:
+                      subprocess.run(['git', 'clone', '-b', branch, url], check=True)
           EOF
 
       - name: Install package dependencies
@@ -318,54 +374,71 @@ jobs:
           . /opt/ros/${ROS_DISTRO}/setup.sh
           colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-      - name: Create .deb package
+      - name: Create .deb packages
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          ARCH=$(dpkg --print-architecture)
-          PKG_DIR="/deb_pkg"
-          INSTALL_DIR="${PKG_DIR}/opt/ros/${ROS_DISTRO}"
-          DEB_NAME="${{ steps.pkg-config.outputs.deb_name }}"
-
-          mkdir -p ${PKG_DIR}/DEBIAN
-          mkdir -p ${INSTALL_DIR}
-
-          python3 << EOF
+          python3 << 'PYEOF'
           import json
+          import subprocess
           import shutil
           import os
 
-          install_dirs = json.loads('${{ steps.pkg-config.outputs.install_dirs }}')
+          packages = json.loads('${{ steps.pkg-config.outputs.packages }}')
+          version = "${{ github.event.inputs.version }}"
+          ros_distro = os.environ.get('ROS_DISTRO', 'humble')
+          workspace = os.environ.get('GITHUB_WORKSPACE', '.')
+          arch = subprocess.check_output(['dpkg', '--print-architecture']).decode().strip()
 
-          for dir_name in install_dirs:
-              src = f"/ros2_ws/install/{dir_name}"
-              if os.path.exists(src):
-                  for item in os.listdir(src):
-                      s = os.path.join(src, item)
-                      d = os.path.join("${INSTALL_DIR}", item)
-                      if os.path.isdir(s):
-                          shutil.copytree(s, d, dirs_exist_ok=True)
-                      else:
-                          shutil.copy2(s, d)
-                  print(f"Copied {dir_name}")
-          EOF
+          for pkg in packages:
+              deb_name = pkg['deb_name']
+              description = pkg['description']
+              dependencies = pkg['dependencies']
+              install_dirs = pkg['install_dirs']
 
-          cat > ${PKG_DIR}/DEBIAN/control << EOF
-          Package: ros-${ROS_DISTRO}-${DEB_NAME}
-          Version: ${VERSION}
+              print(f"\nPackaging {pkg['pkg_name']}...")
+
+              pkg_dir = '/deb_pkg'
+              install_dir = f'{pkg_dir}/opt/ros/{ros_distro}'
+
+              if os.path.exists(pkg_dir):
+                  shutil.rmtree(pkg_dir)
+              os.makedirs(f'{pkg_dir}/DEBIAN')
+              os.makedirs(install_dir)
+
+              for dir_name in install_dirs:
+                  src = f'/ros2_ws/install/{dir_name}'
+                  if os.path.exists(src):
+                      for item in os.listdir(src):
+                          s = os.path.join(src, item)
+                          d = os.path.join(install_dir, item)
+                          if os.path.isdir(s):
+                              shutil.copytree(s, d, dirs_exist_ok=True)
+                          else:
+                              shutil.copy2(s, d)
+                      print(f"  Copied {dir_name}")
+
+              control_content = f"""Package: ros-{ros_distro}-{deb_name}
+          Version: {version}
           Section: misc
           Priority: optional
-          Architecture: ${ARCH}
-          Depends: ${{ steps.pkg-config.outputs.dependencies }}
+          Architecture: {arch}
+          Depends: {dependencies}
           Maintainer: GitHub Actions <actions@github.com>
-          Description: ${{ steps.pkg-config.outputs.description }}
-          EOF
+          Description: {description}
+          """
 
-          sed -i 's/^          //' ${PKG_DIR}/DEBIAN/control
-          chmod -R 755 ${PKG_DIR}
-          chmod 644 ${PKG_DIR}/DEBIAN/control
+              with open(f'{pkg_dir}/DEBIAN/control', 'w') as f:
+                  for line in control_content.strip().split('\n'):
+                      f.write(line.strip() + '\n')
 
-          DEB_FILE="ros-${ROS_DISTRO}-${DEB_NAME}_${VERSION}_${ARCH}.deb"
-          dpkg-deb --build ${PKG_DIR} ${GITHUB_WORKSPACE}/${DEB_FILE}
+              subprocess.run(['chmod', '-R', '755', pkg_dir], check=True)
+              subprocess.run(['chmod', '644', f'{pkg_dir}/DEBIAN/control'], check=True)
+
+              deb_file = f'ros-{ros_distro}-{deb_name}_{version}_{arch}.deb'
+              subprocess.run(['dpkg-deb', '--build', pkg_dir, f'{workspace}/{deb_file}'], check=True)
+              print(f"  Created: {deb_file}")
+
+          print("\nAll AMD64 packages built successfully!")
+          PYEOF
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
