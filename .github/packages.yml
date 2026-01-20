@@ -1,0 +1,105 @@
+# ROS2 Package Build Configuration
+# Define packages to build and release as .deb files
+#
+# Each package entry should have:
+#   - name: Package identifier (used in workflow selection)
+#   - deb_name: Name used in .deb file (ros-{distro}-{deb_name})
+#   - description: Package description for .deb metadata
+#   - repositories: List of git repos to clone
+#     - url: Git repository URL
+#       branch: Branch to clone
+#   - install_dirs: Directories from /ros2_ws/install to include in .deb
+#   - dependencies: ROS dependencies for the .deb package
+#   - arm64_targets: List of ARM64 CPU targets to build for (optional)
+#     - cpu: CPU name (cortex-a53, cortex-a72, generic)
+#       suffix: Suffix for deb file name (e.g., -a53, -a72)
+
+ros_distro: humble
+
+# ARM64 CPU build targets
+# Each target will produce a separate .deb file optimized for that CPU
+arm64_targets:
+  generic:
+    cpu_flags: "-march=armv8-a -O3"
+    suffix: ""
+  cortex-a53:
+    cpu_flags: "-mcpu=cortex-a53 -O3"
+    suffix: "-a53"
+  cortex-a72:
+    cpu_flags: "-mcpu=cortex-a72 -O3"
+    suffix: "-a72"
+  cortex-a76:
+    cpu_flags: "-mcpu=cortex-a76 -O3"
+    suffix: "-a76"
+
+packages:
+  teb:
+    deb_name: teb-local-planner
+    description: |
+      TEB Local Planner for ROS2
+      Timed Elastic Band approach for local trajectory planning.
+    repositories:
+      - url: https://github.com/rst-tu-dortmund/teb_local_planner.git
+        branch: humble-devel
+      - url: https://github.com/rst-tu-dortmund/costmap_converter.git
+        branch: humble
+    install_dirs:
+      - teb_local_planner
+      - costmap_converter
+    dependencies:
+      - ros-humble-ros-base
+    # Which ARM64 targets to build (leave empty or omit for generic only)
+    arm64_targets:
+      - generic
+      - cortex-a53
+      - cortex-a72
+
+  mppi:
+    deb_name: nav2-mppi-controller
+    description: |
+      MPPI Controller for Nav2
+      Model Predictive Path Integral controller for ROS2 Navigation.
+    repositories:
+      - url: https://github.com/ros-navigation/navigation2.git
+        branch: humble
+        sparse_checkout:
+          - nav2_mppi_controller
+    install_dirs:
+      - nav2_mppi_controller
+    dependencies:
+      - ros-humble-nav2-common
+      - ros-humble-nav2-core
+    arm64_targets:
+      - generic
+      - cortex-a72
+
+  costmap-converter:
+    deb_name: costmap-converter
+    description: |
+      Costmap Converter for ROS2
+      Converts costmap_2d into geometric primitives.
+    repositories:
+      - url: https://github.com/rst-tu-dortmund/costmap_converter.git
+        branch: humble
+    install_dirs:
+      - costmap_converter
+    dependencies:
+      - ros-humble-ros-base
+    arm64_targets:
+      - generic
+
+  # Example: Add more packages here
+  # my-package:
+  #   deb_name: my-ros-package
+  #   description: |
+  #     My custom ROS2 package
+  #   repositories:
+  #     - url: https://github.com/user/repo.git
+  #       branch: main
+  #   install_dirs:
+  #     - my_package
+  #   dependencies:
+  #     - ros-humble-ros-base
+  #   arm64_targets:
+  #     - generic
+  #     - cortex-a72
