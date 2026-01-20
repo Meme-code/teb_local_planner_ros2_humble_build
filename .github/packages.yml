@@ -47,7 +47,12 @@ packages:
       - teb_local_planner
       - costmap_converter
     dependencies:
-      - ros-humble-ros-base
+      - ros-humble-nav2-common
+      - ros-humble-nav2-core
+      - ros-humble-nav2-costmap-2d
+      - ros-humble-libg2o
+      - ros-humble-visualization-msgs
+      - ros-humble-interactive-markers
     # Which ARM64 targets to build (leave empty or omit for generic only)
     arm64_targets:
       - generic
@@ -84,7 +89,9 @@ packages:
     install_dirs:
       - costmap_converter
     dependencies:
-      - ros-humble-ros-base
+      - ros-humble-nav2-costmap-2d
+      - ros-humble-geometry-msgs
+      - ros-humble-std-msgs
     arm64_targets:
       - generic
 
