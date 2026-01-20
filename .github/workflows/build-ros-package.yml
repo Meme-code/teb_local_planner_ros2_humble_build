@@ -186,18 +186,14 @@ jobs:
 
               # Build with target-specific flags
               os.chdir('/ros2_ws')
-              build_cmd = [
-                  'colcon', 'build',
-                  '--cmake-args',
-                  '-DCMAKE_BUILD_TYPE=Release',
-                  f'-DCMAKE_CXX_FLAGS={cpu_flags}',
-                  f'-DCMAKE_C_FLAGS={cpu_flags}'
-              ]
-
-              subprocess.run(
-                  f'. /opt/ros/{ros_distro}/setup.sh && {" ".join(build_cmd)}',
-                  shell=True, check=True, executable='/bin/bash'
+              build_cmd = (
+                  f'. /opt/ros/{ros_distro}/setup.sh && '
+                  f'colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release '
+                  f'"-DCMAKE_CXX_FLAGS={cpu_flags}" '
+                  f'"-DCMAKE_C_FLAGS={cpu_flags}"'
               )
+
+              subprocess.run(build_cmd, shell=True, check=True, executable='/bin/bash')
 
               # Create .deb for each package that needs this target
               for pkg in packages:
